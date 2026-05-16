@@ -1,0 +1,106 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lac-py"
+version = "2025.5.15"
+description = "A CLI for managing AI agent config files without committing them to the repo."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Youngkwang Yang", email = "me@youngkwang.dev" }]
+keywords = ["claude-code", "cursor", "codex", "ai-agent", "config", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Version Control",
+]
+dependencies = [
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "questionary>=2.0",
+    "rich>=13.0",
+    "rich-click>=1.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/2ykwang/lac"
+Repository = "https://github.com/2ykwang/lac"
+Issues = "https://github.com/2ykwang/lac/issues"
+Changelog = "https://github.com/2ykwang/lac/blob/main/CHANGELOG.md"
+
+[project.scripts]
+lac = "lac.cli:entry"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lac"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/pyproject.toml",
+]
+
+[dependency-groups]
+dev = [
+    "coverage==7.14.0",
+    "pytest==9.0.3",
+    "pytest-cov==7.1.0",
+    "ruff==0.15.12",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "SIM", "RET", "T20", "D"]
+
+# ANN (type strictness) and mypy are not enforced. Type hints are written
+# but not statically checked.
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names declare behavior; docstrings are redundant.
+"tests/**/*.py" = ["D"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --cov=lac --cov-report=term-missing"
+filterwarnings = [
+    "ignore::coverage.exceptions.CoverageWarning",
+]
+
+[tool.coverage.run]
+source = ["lac"]
+parallel = true
+branch = true
+relative_files = true
+data_file = ".coverage_data/cov"
+
+[tool.coverage.paths]
+source = ["src/lac", "*/site-packages/lac"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
