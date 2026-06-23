@@ -14,12 +14,28 @@ import rich_click as click
 from rich.table import Table
 
 from . import __version__, console
-from .gitutil import append_exclude, is_git_repo, is_tracked, remove_exclude
+from .checks import (
+    check_exclude_block_integrity,
+    check_slug_extra_files,
+    check_slug_missing_files,
+    check_symlink,
+    check_symlink_targets,
+)
+from .gitutil import (
+    LacHomeGitStatus,
+    append_exclude,
+    git_remote_url,
+    is_git_repo,
+    is_tracked,
+    lac_home_git_status,
+    remove_exclude,
+    write_slug_pointer,
+)
 from .home import ensure_lac_home, get_lac_home
 from .link import make_symlink, unlink_safely
 from .meta import Meta
-from .slugdir import get_slug_dir, init_slug_dir
-from .template import AGENT_CONFIG_FILES, is_empty_entry
+from .slugdir import get_slug_dir, init_slug_dir, read_local_path, write_local_path
+from .template import AGENT_CONFIG_FILES
 
 _DecisionAction = Literal["link", "keep_link", "skip", "skip_tracked", "already_linked", "abort"]
 
@@ -30,6 +46,8 @@ _SlugStatus = Literal[
     "corrupted",
     "extra",
     "missing",
+    "exclude-drift",
+    "not-on-this-machine",
 ]
 
 
@@ -251,17 +269,108 @@ def _apply_one(cwd: Path, slug_dir: Path, decision: _Decision) -> bool:
     raise ValueError(f"unknown action: {decision.action}")  # pragma: no cover
 
 
+def _adoptable_slugs(home: Path, cwd: Path) -> list[tuple[Path, Meta]]:
+    """Return active slugs whose recorded `repo_path` does not exist locally.
+
+    Such slugs were registered on another machine and synced here, so they
+    are adoption candidates when registering an otherwise-unmatched repo.
+    Basename matches with `cwd` are ordered first.
+
+    Args:
+        home: lac home directory.
+        cwd: Repo working directory being registered.
+
+    Returns:
+        List of (slug directory, meta), basename matches first.
+    """
+    candidates: list[tuple[Path, Meta]] = []
+    for entry, meta in _iter_slugs(home):
+        if meta is None:
+            continue
+        # No `.lac.local` => not bound on this machine => an adoption candidate.
+        if read_local_path(entry) is None:
+            candidates.append((entry, meta))
+    # Order basename matches first. Assumes the `{name}-{hash6}` slug convention;
+    # a renamed slug without a trailing `-hash` just sorts lower (list unaffected).
+    candidates.sort(key=lambda c: c[0].name.rsplit("-", 1)[0] != cwd.name)
+    return candidates
+
+
+def _prompt_adopt(cwd: Path, candidates: list[tuple[Path, Meta]]) -> Path | Literal["new", "abort"]:
+    """Prompt the user to adopt an existing slug or create a new one.
+
+    Args:
+        cwd: Repo working directory being registered.
+        candidates: Adoptable slugs from `_adoptable_slugs`.
+
+    Returns:
+        Slug directory to adopt, "new" to create fresh, or "abort".
+    """
+    console.warn(f"'{cwd.name}' is not registered. Found storage from another machine:")
+    c = console.console()
+    for i, (entry, meta) in enumerate(candidates, 1):
+        c.print(
+            f"  [{i}] {entry.name}  ({meta.repo_remote or 'no remote'}, "
+            f"{len(meta.linked_files)} linked)",
+            markup=False,
+        )
+    c.print("  [n] create new storage", markup=False)
+    c.print("  [a] abort", markup=False)
+    choices = [str(i) for i in range(1, len(candidates) + 1)] + ["n", "a"]
+    raw = click.prompt("Choice", type=click.Choice(choices), show_choices=False)
+    if raw == "a":
+        return "abort"
+    if raw == "n":
+        return "new"
+    return candidates[int(raw) - 1][0]
+
+
+def _adopt_slug(slug_dir: Path, cwd: Path) -> None:
+    """Bind `cwd` to an existing `slug_dir`: update meta remote + write pointers.
+
+    Args:
+        slug_dir: Slug directory to adopt.
+        cwd: Repo working directory claiming the slug.
+    """
+    meta_path = slug_dir / ".lac.meta"
+    meta = Meta.load_safe(meta_path)
+    if meta is not None:
+        meta.repo_remote = git_remote_url(cwd)
+        meta.save(meta_path)
+    write_slug_pointer(cwd, slug_dir.name)
+    write_local_path(slug_dir, cwd)
+
+
 @main.command(epilog="Example: cd <git-repo> && lac register && lac link")
 def register() -> None:
     """Register the current repo.
 
-    Then run 'lac link' to link agent config files.
+    When the repo is not matched but storage from another machine exists,
+    offers to connect to it instead of creating a new one. Then run
+    'lac link' to link agent config files.
     """
     cwd = Path.cwd()
     if not is_git_repo(cwd):
         console.error("not a git repository")
         console.info("run from inside a git repository — try 'cd <repo>' or 'git init'")
         sys.exit(1)
+
+    ensure_lac_home()
+    slug_dir = get_slug_dir(cwd)
+
+    if not slug_dir.exists():
+        candidates = _adoptable_slugs(get_lac_home(), cwd)
+        interactive = os.environ.get("LAC_NONINTERACTIVE") != "1" and sys.stdin.isatty()
+        if candidates and interactive:
+            choice = _prompt_adopt(cwd, candidates)
+            if choice == "abort":
+                console.info("aborted (no changes)")
+                sys.exit(1)
+            if choice != "new":
+                _adopt_slug(choice, cwd)
+                console.ok(f"connected to {choice}")
+                console.info("run 'lac link' to link agent config files in this repo")
+                return
 
     slug_dir = init_slug_dir(cwd)
     console.ok(f"registered at {slug_dir}")
@@ -600,8 +709,7 @@ def unregister(yes: bool) -> None:
         link_path = cwd / name
         if not link_path.exists() and not link_path.is_symlink():
             continue
-
-        reason = _check_symlink(cwd, slug_dir, name)
+        reason = check_symlink(cwd, slug_dir, name)
         if reason in (None, "target missing"):
             continue
 
@@ -641,14 +749,23 @@ def unregister(yes: bool) -> None:
             console.error(f"{name}: restore failed ({e})")
             restore_failed.append(name)
 
-    # Backup slug.
+    # Backup slug. Append -2, -3, ... when same-second backups already exist.
     ts = datetime.now().strftime("%y%m%d-%H%M%S")
     bak_path = slug_dir.parent / f"{slug_dir.name}.bak.{ts}"
+    for suffix in range(2, 101):
+        if not bak_path.exists():
+            break
+        bak_path = slug_dir.parent / f"{slug_dir.name}.bak.{ts}-{suffix}"
+    else:  # pragma: no cover
+        console.error(f"too many backups for {slug_dir.name} at {ts}")
+        sys.exit(1)
     slug_dir.rename(bak_path)
 
     summary = f"unregistered. restored {len(restored)} files. backup: {bak_path}"
     if restore_failed:
         summary += f" ({len(restore_failed)} restore failed: {', '.join(restore_failed)})"
+    if meta.unlinked_files:
+        summary += f" (unlinked preserved in backup: {', '.join(meta.unlinked_files)})"
     console.ok(summary)
 
 
@@ -693,8 +810,14 @@ def list_() -> None:
         if meta is None:
             continue
 
-        status = "orphan" if not Path(meta.repo_path).exists() else "ok"
-        rows.append((entry.name, meta.repo_path, str(len(meta.linked_files)), status))
+        local = read_local_path(entry)
+        if local is None:
+            status, repo_path = "not-on-this-machine", "(other machine)"
+        elif not local.exists():
+            status, repo_path = "orphan", str(local)
+        else:
+            status, repo_path = "ok", str(local)
+        rows.append((entry.name, repo_path, str(len(meta.linked_files)), status))
 
     if not rows:
         console.info("no registered repos")
@@ -706,7 +829,12 @@ def list_() -> None:
     table.add_column("#linked", justify="right")
     table.add_column("status")
     for slug_name, repo_path, n, status in rows:
-        style = "red" if status == "orphan" else ""
+        if status == "orphan":
+            style = "red"
+        elif status == "not-on-this-machine":
+            style = "yellow"
+        else:
+            style = ""
         table.add_row(slug_name, repo_path, n, f"[{style}]{status}[/{style}]" if style else status)
     console.console().print(table)
 
@@ -715,36 +843,6 @@ def list_() -> None:
 def home() -> None:
     """Print the lac storage root directory."""
     click.echo(str(get_lac_home()))
-
-
-def _check_symlink(repo_path: Path, slug_dir: Path, name: str) -> str | None:
-    """Inspect a managed symlink for health.
-
-    Args:
-        repo_path: Repo working directory.
-        slug_dir: Slug directory under lac home.
-        name: Entry name relative to `repo_path` and `slug_dir`.
-
-    Returns:
-        None if the symlink is healthy, else a short failure reason.
-    """
-    link_path = repo_path / name
-    target = slug_dir / name
-    if not link_path.is_symlink():
-        return "not a managed link"
-
-    try:
-        current = (link_path.parent / os.readlink(link_path)).resolve()
-    except OSError:
-        return "unreadable link"
-
-    if current != target.resolve():
-        return "wrong target"
-
-    if not target.exists():
-        return "target missing"
-
-    return None
 
 
 @main.command()
@@ -761,6 +859,7 @@ def doctor() -> None:
     rows: list[tuple[str, _SlugStatus, str]] = []
     ok_count = 0
     issue_count = 0
+    other_count = 0
     found_statuses: set[_SlugStatus] = set()
 
     backup_count = sum(1 for entry in home.iterdir() if entry.is_dir() and ".bak." in entry.name)
@@ -772,60 +871,43 @@ def doctor() -> None:
             found_statuses.add("corrupted")
             continue
 
-        repo_path = Path(meta.repo_path)
+        local = read_local_path(entry)
+        if local is None:
+            rows.append((entry.name, "not-on-this-machine", "registered on another machine"))
+            other_count += 1
+            found_statuses.add("not-on-this-machine")
+            continue
+
+        repo_path = local
         if not repo_path.exists():
-            rows.append(
-                (
-                    entry.name,
-                    "orphan",
-                    f"repo_path missing: {meta.repo_path} (may be registered on another machine)",
-                )
-            )
+            rows.append((entry.name, "orphan", f"repo gone: {repo_path}"))
             issue_count += 1
             found_statuses.add("orphan")
             continue
 
-        broken: list[str] = []
-        missing: list[str] = []
-        for name in meta.linked_files:
-            reason = _check_symlink(repo_path, entry, name)
-            if reason == "target missing":
-                missing.append(name)
-            elif reason:
-                broken.append(f"{name} ({reason})")
-
-        linked_set = set(meta.linked_files)
-        kept_set = set(meta.unlinked_files)
-        extra: list[str] = []
-        for child in sorted(entry.iterdir()):
-            if child.name == ".lac.meta":
-                continue
-
-            if child.name in linked_set:
-                continue
-
-            if child.name in kept_set:
-                continue
-
-            if is_empty_entry(child):
-                continue
-
-            extra.append(child.name)
+        broken_findings = check_symlink_targets(repo_path, meta, entry)
+        missing_findings = check_slug_missing_files(repo_path, meta, entry)
+        extra_findings = check_slug_extra_files(repo_path, meta, entry)
+        exclude_findings = check_exclude_block_integrity(repo_path, meta, entry)
 
         parts: list[str] = []
-        if broken:
-            parts.append("broken: " + "; ".join(broken))
-        if missing:
-            parts.append("missing: " + ", ".join(missing))
-        if extra:
-            parts.append("extra: " + ", ".join(extra))
+        if broken_findings:
+            parts.append("broken: " + "; ".join(f.message for f in broken_findings))
+        if missing_findings:
+            parts.append("missing: " + ", ".join(f.message for f in missing_findings))
+        if extra_findings:
+            parts.append("extra: " + ", ".join(f.message for f in extra_findings))
+        if exclude_findings:
+            parts.append("exclude-drift")
 
-        if broken:
+        if broken_findings:
             status: _SlugStatus = "broken"
-        elif missing:
+        elif missing_findings:
             status = "missing"
-        elif extra:
+        elif extra_findings:
             status = "extra"
+        elif exclude_findings:
+            status = "exclude-drift"
         else:
             status = "ok"
 
@@ -849,7 +931,7 @@ def doctor() -> None:
         for slug_name, status, detail in rows:
             if status == "ok":
                 style = "green"
-            elif status == "orphan":
+            elif status == "not-on-this-machine":
                 style = "yellow"
             else:
                 style = "red"
@@ -857,6 +939,8 @@ def doctor() -> None:
         console.console().print(table)
 
     summary = f"{ok_count} ok, {issue_count} issues found"
+    if other_count:
+        summary += f", {other_count} on other machines"
     if backup_count:
         summary += f", {backup_count} backup dir(s)"
     console.info(summary)
@@ -864,7 +948,12 @@ def doctor() -> None:
     if found_statuses or backup_count:
         hints: list[str] = []
         if "orphan" in found_statuses:
-            hints.append("  - orphan: may belong to another machine; verify before removing")
+            hints.append("  - orphan: repo bound here is gone; restore it or `lac unregister`")
+        if "not-on-this-machine" in found_statuses:
+            hints.append(
+                "  - not-on-this-machine: registered elsewhere; "
+                "run `lac register` in the repo here to activate"
+            )
         if "corrupted" in found_statuses:
             hints.append("  - corrupted: rm -rf $(lac home)/<name>")
         if "broken" in found_statuses:
@@ -873,6 +962,11 @@ def doctor() -> None:
             hints.append("  - missing: file recorded but not in storage; restore or unregister")
         if "extra" in found_statuses:
             hints.append("  - extra: file in storage without record; run `lac link <file>`")
+        if "exclude-drift" in found_statuses:
+            hints.append(
+                "  - exclude-drift: cd <repo> && lac unregister --yes && lac register "
+                "&& lac link --all"
+            )
         if backup_count:
             hints.append("  - backup cleanup: rm -rf $(lac home)/*.bak.*")
         if hints:
@@ -949,8 +1043,7 @@ def rename(new_name: str) -> None:
         link_path = cwd / name
         if not link_path.exists() and not link_path.is_symlink():
             continue
-
-        reason = _check_symlink(cwd, old_slug, name)
+        reason = check_symlink(cwd, old_slug, name)
         if reason is not None and reason != "target missing":
             console.error(f"{name}: {reason} — refusing")
             console.info("run 'lac doctor' to inspect")
@@ -968,6 +1061,8 @@ def rename(new_name: str) -> None:
         except (FileExistsError, OSError) as e:
             console.error(f"{name}: failed to retarget — {e}")
 
+    write_slug_pointer(cwd, new_name)
+    write_local_path(new_slug, cwd)
     console.ok(f"renamed to {new_name}")
 
 
@@ -999,6 +1094,25 @@ def path(file: str | None) -> None:
     click.echo(str(slug_dir / file))
 
 
+def _format_lac_home_git(s: LacHomeGitStatus) -> str:
+    """Render a `LacHomeGitStatus` snapshot in POLICY §3.2 mockup form."""
+    branch = s.branch or "(detached)"
+    if s.merging:
+        n = len(s.conflict_paths)
+        suffix = f"⚠ MERGING ({n} conflicts)" if n else "⚠ MERGING"
+        return f"{branch} · {suffix}"
+    tokens: list[str] = []
+    if s.uncommitted_count:
+        tokens.append(f"{s.uncommitted_count} uncommitted")
+    if s.ahead:
+        tokens.append(f"{s.ahead} ahead")
+    if s.behind:
+        tokens.append(f"{s.behind} behind")
+    if not tokens:
+        tokens.append("clean")
+    return f"{branch} · " + " · ".join(tokens)
+
+
 @main.command()
 def status() -> None:
     """Show registration state of the current repo."""
@@ -1023,12 +1137,19 @@ def status() -> None:
     table = Table(show_header=False, box=None)
     table.add_column("key", style="cyan")
     table.add_column("value")
+    local = read_local_path(slug_dir)
     table.add_row("lac_home", str(get_lac_home()))
     table.add_row("name", slug_dir.name)
     table.add_row("storage_dir", str(slug_dir))
-    table.add_row("repo_path", meta.repo_path)
+    table.add_row("repo_path", str(local) if local else "(not on this machine)")
+    table.add_row("repo_remote", meta.repo_remote or "(none)")
     table.add_row("created_at", meta.created_at)
     table.add_row("linked_files", "\n".join(meta.linked_files) or "(none)")
+    git_status = lac_home_git_status(get_lac_home())
+    if git_status is not None:
+        table.add_row("lac_home_git", _format_lac_home_git(git_status))
+        if git_status.conflict_paths:
+            table.add_row("lac_home_conflicts", "\n".join(git_status.conflict_paths))
     console.console().print(table)
 
 
