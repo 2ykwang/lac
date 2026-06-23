@@ -902,3 +902,73 @@ def test_rename_carries_lac_local(make_git_repo, run_lac, lac_home):
     run_lac("rename", "pretty-name", cwd=repo)
     new_slug = lac_home / "pretty-name"
     assert read_local_path(new_slug) == repo.resolve()
+
+
+# --- lac sync — pull-only fast-forward of lac home ---
+
+
+def _setup_lac_home_remote(lac_home: Path, tmp_path: Path, run_lac, make_git_repo) -> Path:
+    """Register a repo (creating lac home git), then give lac home a pushed remote.
+
+    Returns the bare remote path.
+    """
+    repo = make_git_repo("synced")
+    run_lac("register", cwd=repo)
+    _commit_all_in_lac_home(lac_home)
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote)], check=True, capture_output=True
+    )
+    _git(lac_home, "remote", "add", "origin", str(remote))
+    _git(lac_home, "push", "-q", "-u", "origin", "main")
+    return remote
+
+
+def _push_remote_commit(remote: Path, tmp_path: Path) -> None:
+    """Clone the bare remote, add a commit, push — so lac home can fast-forward."""
+    work = tmp_path / "remote-work"
+    subprocess.run(["git", "clone", "-q", str(remote), str(work)], check=True, capture_output=True)
+    (work / "from_remote.txt").write_text("x\n")
+    _git(work, "add", ".")
+    _git(work, "commit", "-q", "-m", "remote change")
+    _git(work, "push", "-q")
+
+
+def test_sync_fast_forwards_from_remote(make_git_repo, run_lac, lac_home, tmp_path):
+    remote = _setup_lac_home_remote(lac_home, tmp_path, run_lac, make_git_repo)
+    _push_remote_commit(remote, tmp_path)
+    cp = run_lac("sync", cwd=make_git_repo("any"))
+    assert "synced" in cp.stdout.lower()
+    assert (lac_home / "from_remote.txt").exists()  # fast-forwarded content present
+
+
+def test_sync_reports_up_to_date(make_git_repo, run_lac, lac_home, tmp_path):
+    _setup_lac_home_remote(lac_home, tmp_path, run_lac, make_git_repo)
+    cp = run_lac("sync", cwd=make_git_repo("any"))
+    assert "up to date" in cp.stdout.lower()
+
+
+def test_sync_diverged_makes_no_commit(make_git_repo, run_lac, lac_home, tmp_path):
+    remote = _setup_lac_home_remote(lac_home, tmp_path, run_lac, make_git_repo)
+    _push_remote_commit(remote, tmp_path)  # remote ahead
+    (lac_home / "local_only.txt").write_text("y\n")  # local diverging commit
+    _git(lac_home, "add", ".")
+    _git(lac_home, "commit", "-q", "-m", "local change")
+    head_before = subprocess.run(
+        ["git", "-C", str(lac_home), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    cp = run_lac("sync", cwd=make_git_repo("any"), check=False)
+    assert cp.returncode == 1
+    assert "fast-forward" in (cp.stdout + cp.stderr).lower()
+    head_after = subprocess.run(
+        ["git", "-C", str(lac_home), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    assert head_before == head_after  # nothing merged/committed
+
+
+def test_sync_errors_without_upstream(make_git_repo, run_lac, lac_home):
+    repo = make_git_repo()
+    run_lac("register", cwd=repo)  # lac home git exists but no remote
+    cp = run_lac("sync", cwd=repo, check=False)
+    assert cp.returncode == 1
+    assert "upstream" in (cp.stdout + cp.stderr).lower()

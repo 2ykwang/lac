@@ -3,6 +3,7 @@
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 LAC_MARK_START = "# === lac:start ==="
 LAC_MARK_END = "# === lac:end ==="
@@ -328,3 +329,33 @@ def lac_home_git_status(home: Path) -> LacHomeGitStatus | None:
         merging=merging,
         conflict_paths=tuple(conflict_paths),
     )
+
+
+SyncOutcome = Literal["no-upstream", "up-to-date", "updated", "no-ff"]
+
+
+def pull_lac_home(home: Path) -> SyncOutcome:
+    """Fast-forward lac home from its upstream. Pull-only; never merges or commits.
+
+    A fast-forward moves the branch pointer to the remote tip and creates no
+    commit. When local and remote have diverged (or local changes block the
+    update), the fast-forward is refused and nothing is changed — the caller
+    guides the user to resolve manually. Pushing is never automated.
+
+    Args:
+        home: lac home directory (assumed git-initialized by `ensure_lac_home`).
+
+    Returns:
+        - "no-upstream" — no tracking branch configured.
+        - "up-to-date"  — already at the remote tip.
+        - "updated"     — fast-forwarded to new commits.
+        - "no-ff"       — diverged or blocked; nothing changed.
+    """
+    if _run_git(home, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") is None:
+        return "no-upstream"
+    before = _run_git(home, "rev-parse", "HEAD")
+    result = subprocess.run(["git", "pull", "--ff-only"], cwd=home, capture_output=True, text=True)
+    if result.returncode != 0:
+        return "no-ff"
+    after = _run_git(home, "rev-parse", "HEAD")
+    return "up-to-date" if before == after else "updated"

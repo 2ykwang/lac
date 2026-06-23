@@ -28,6 +28,7 @@ from .gitutil import (
     is_git_repo,
     is_tracked,
     lac_home_git_status,
+    pull_lac_home,
     remove_exclude,
     write_slug_pointer,
 )
@@ -843,6 +844,25 @@ def list_() -> None:
 def home() -> None:
     """Print the lac storage root directory."""
     click.echo(str(get_lac_home()))
+
+
+@main.command(epilog="Example: lac sync")
+def sync() -> None:
+    """Fast-forward lac home from its remote (pull-only; never merges or pushes)."""
+    outcome = pull_lac_home(get_lac_home())
+    if outcome == "no-upstream":
+        console.error("lac home has no upstream configured")
+        console.info("cd $(lac home) && git remote add origin <url> && git push -u origin main")
+        sys.exit(1)
+    if outcome == "no-ff":
+        console.error("cannot fast-forward — lac home diverged from remote (or has local changes)")
+        console.info("resolve manually: cd $(lac home) && git pull --rebase")
+        console.info("fix any conflicts, then 'git rebase --continue'. pushing stays manual.")
+        sys.exit(1)
+    if outcome == "up-to-date":
+        console.ok("already up to date")
+        return
+    console.ok("synced (fast-forwarded)")
 
 
 @main.command()

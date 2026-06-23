@@ -6,11 +6,15 @@ This project uses [CalVer](https://calver.org/) (YYYY.MM.PATCH).
 ## [Unreleased]
 
 ### Added
+- `lac sync` fast-forwards lac home from its remote (pull-only; never merges,
+  commits, or pushes). On divergence it changes nothing and points you to a
+  manual `git pull --rebase`.
 - `lac register` offers to connect to storage registered on another machine
   instead of creating a duplicate slug, and records the binding in `.git/lac`
   (machine-local) so it survives repo moves and cross-machine sync.
 - `doctor`/`list`/`status` distinguish `not-on-this-machine` (registered
   elsewhere) from `orphan` (bound here but the repo is gone).
+- `lac status` lists conflicting file paths when lac home is mid-merge.
 
 ### Changed
 - **Breaking:** the per-machine repo path moved out of the synced `.lac.meta`
