@@ -158,9 +158,9 @@ def test_doctor_reports_corrupted_when_meta_unparseable(registered_repo, run_lac
     assert "corrupted" in cp.stdout
 
 
-def test_doctor_reports_orphan_when_repo_path_missing(make_git_repo, run_lac, lac_home, tmp_path):
+def test_doctor_reports_orphan_when_bound_repo_gone(make_git_repo, run_lac, lac_home, tmp_path):
     repo = make_git_repo("doomed")
-    run_lac("register", cwd=repo)
+    run_lac("register", cwd=repo)  # writes .lac.local binding this machine
     shutil.rmtree(repo)
 
     # doctor reads lac home only; cwd just needs to exist.
@@ -168,8 +168,7 @@ def test_doctor_reports_orphan_when_repo_path_missing(make_git_repo, run_lac, la
     runner_cwd.mkdir()
     cp = run_lac("doctor", cwd=runner_cwd)
     assert "orphan" in cp.stdout
-    assert "another machine" in cp.stdout
-    assert "verify before removing" in cp.stdout
+    assert "gone" in cp.stdout
 
 
 def test_doctor_reports_missing_when_storage_file_missing(registered_repo, run_lac, lac_home):
