@@ -431,6 +431,7 @@ EXPECTED_LAC_HOME_IGNORE_PATTERNS = [
     ".vscode/",
     "*.swp",
     ".lac.local",
+    "__pycache__/",
 ]
 
 
