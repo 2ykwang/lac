@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import console
+from .gitutil import apply_lac_home_gitignore
 from .template import ensure_template
 
 
@@ -23,7 +24,7 @@ def get_lac_home() -> Path:
 
 
 def ensure_lac_home() -> Path:
-    """Create lac home directory, git-init it, and ensure the template exists. Idempotent.
+    """Create lac home, git-init it, apply managed `.gitignore`, ensure template. Idempotent.
 
     Returns:
         Resolved lac home path.
@@ -38,6 +39,12 @@ def ensure_lac_home() -> Path:
 
     home.mkdir(parents=True, exist_ok=True)
     if not (home / ".git").is_dir():
-        subprocess.run(["git", "init", "-q"], cwd=home, check=True)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=home, check=True)
+        console.info(
+            f"lac home initialized at {home}. For cross-machine sync, exit now and run: "
+            f"rm -rf {home} && git clone <remote> {home}",
+            stderr=True,
+        )
+    apply_lac_home_gitignore(home)
     ensure_template(home)
     return home

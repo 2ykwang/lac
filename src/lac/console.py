@@ -44,13 +44,16 @@ def error(msg: str) -> None:
     _err_console.print(f"[red]error[/red] {msg}")
 
 
-def info(msg: str) -> None:
+def info(msg: str, *, stderr: bool = False) -> None:
     """Print an informational line in cyan.
 
     Args:
         msg: Message to print after the "info" tag.
+        stderr: If True, route to stderr; default routes to stdout. Use stderr
+            in commands whose stdout is data-only (e.g. `lac home`, `lac path`).
     """
-    _console.print(f"[cyan]info[/cyan]  {msg}")
+    target = _err_console if stderr else _console
+    target.print(f"[cyan]info[/cyan]  {msg}")
 
 
 def console() -> Console:
