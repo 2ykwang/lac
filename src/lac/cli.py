@@ -853,6 +853,7 @@ def sync() -> None:
     if outcome == "no-upstream":
         console.error("lac home has no upstream configured")
         console.info("cd $(lac home) && git remote add origin <url> && git push -u origin main")
+        console.info("or: git -C $(lac home) branch --set-upstream-to=origin/main main")
         sys.exit(1)
     if outcome == "no-ff":
         console.error("cannot fast-forward — lac home diverged from remote (or has local changes)")

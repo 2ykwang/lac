@@ -93,6 +93,9 @@ git clone <your-private-remote-url> "$LAC_HOME"
 cd ~/projects/repo
 lac register
 lac link --all
+
+# afterwards, on any machine: pull updates (fast-forward only, never pushes)
+lac sync
 ```
 
 ## Commands
@@ -117,13 +120,14 @@ lac link --all
 | `lac home` | Print the storage directory. |
 | `lac path [file]` | Print this repo's storage path (or a file inside it). |
 | `lac rename <name>` | Rename this repo's storage subdirectory. |
+| `lac sync` | Fast-forward the storage directory from its remote (pull-only; never pushes). |
 
 ## Limits
 
 - macOS and Linux only. Windows is not supported.
 - Python ≥3.11.
 - Single-user. Sharing the storage directory between people isn't supported.
-- Sync between machines is manual (`git push` / `git pull`).
+- Pull updates with `lac sync`; pushing is manual (`git push`) by design.
 
 ## License
 
