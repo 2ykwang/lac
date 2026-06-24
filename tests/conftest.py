@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import sysconfig
@@ -97,6 +98,11 @@ def run_lac(lac_home: Path) -> Callable[..., subprocess.CompletedProcess[str]]:
             capture_output=True,
             text=True,
             input=stdin,
+            # Force a wide terminal so rich doesn't word-wrap diagnostic lines
+            # into the middle of phrases the tests assert on. Without a tty,
+            # rich falls back to COLUMNS or 80; CI has neither, so long backup
+            # paths split asserted substrings across lines.
+            env={**os.environ, "COLUMNS": "1000"},
         )
         if check and cp.returncode != 0:
             raise AssertionError(
