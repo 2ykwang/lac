@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lac-py"
-version = "2026.6.24"
+version = "2026.6.25"
 description = "A CLI for managing AI agent config files without committing them to the repo."
 readme = "README.md"
 license = { text = "MIT" }
