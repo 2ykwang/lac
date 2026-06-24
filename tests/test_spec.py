@@ -383,6 +383,43 @@ def test_lac_link_all_links_unaffected_entries_when_one_conflicts(make_git_repo,
         assert (repo / name).is_symlink(), f"{name} not linked despite conflict on CLAUDE.md"
 
 
+def test_link_conflict_routes_to_use_stored_when_slug_already_has_entry(
+    make_git_repo, lac_home, monkeypatch
+):
+    # Cross-machine: repo has an untracked file AND the slug already holds a
+    # synced copy. This must offer the conflict resolution (use_stored), not
+    # silently overwrite the synced copy as the old keep path did.
+    from lac import cli
+
+    repo = make_git_repo()
+    slug = lac_home / "repo-aaaaaa"
+    slug.mkdir(parents=True)
+    (slug / "CLAUDE.md").write_text("A machine content\n")
+    (repo / "CLAUDE.md").write_text("B machine content\n")
+
+    monkeypatch.setattr(cli, "_prompt_conflict", lambda _: "use_stored")
+    decision = cli._decide(repo, slug, "CLAUDE.md")
+    assert decision.action == "use_stored"
+
+
+def test_link_use_stored_preserves_synced_content_and_backs_up_local(make_git_repo, lac_home):
+    from lac.cli import _apply_one, _Decision
+
+    repo = make_git_repo()
+    slug = lac_home / "repo-aaaaaa"
+    slug.mkdir(parents=True)
+    (slug / "CLAUDE.md").write_text("A machine content\n")
+    (repo / "CLAUDE.md").write_text("B machine content\n")
+
+    _apply_one(repo, slug, _Decision("CLAUDE.md", "use_stored"))
+
+    assert (slug / "CLAUDE.md").read_text() == "A machine content\n"  # synced copy untouched
+    assert (repo / "CLAUDE.md").resolve() == (slug / "CLAUDE.md").resolve()  # links to stored
+    baks = [p for p in repo.iterdir() if ".bak." in p.name]
+    assert len(baks) == 1  # local content preserved, not lost
+    assert baks[0].read_text() == "B machine content\n"
+
+
 def test_lac_link_no_args_exits_one_in_non_interactive_mode(make_git_repo, run_lac):
     repo = make_git_repo()
     run_lac("register", cwd=repo)

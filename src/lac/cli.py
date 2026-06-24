@@ -38,7 +38,9 @@ from .meta import Meta
 from .slugdir import get_slug_dir, init_slug_dir, read_local_path, write_local_path
 from .template import AGENT_CONFIG_FILES
 
-_DecisionAction = Literal["link", "keep_link", "skip", "skip_tracked", "already_linked", "abort"]
+_DecisionAction = Literal[
+    "link", "keep_link", "use_stored", "skip", "skip_tracked", "already_linked", "abort"
+]
 
 _SlugStatus = Literal[
     "ok",
@@ -81,6 +83,28 @@ def _copy_into_slug(src: Path, dst: Path) -> None:
         shutil.copytree(src, dst)
     else:
         shutil.copy2(src, dst)
+
+
+def _use_stored(link_path: Path, target: Path) -> Path:
+    """Back up the local entry, then symlink it to the stored copy.
+
+    Used to resolve a cross-machine link conflict in favor of the synced
+    storage. The local entry is untracked (in no git), so it is renamed to a
+    `.bak.<timestamp>` sibling before being replaced by the symlink — without
+    the backup, choosing storage would discard the local content irreversibly.
+
+    Args:
+        link_path: Existing untracked entry in the repo.
+        target: Stored copy under the slug to link to.
+
+    Returns:
+        Path of the backup created from the former local entry.
+    """
+    ts = datetime.now().strftime("%y%m%d-%H%M%S")
+    bak = link_path.parent / f"{link_path.name}.bak.{ts}"
+    link_path.rename(bak)
+    make_symlink(target, link_path)
+    return bak
 
 
 def _populate_slug_entry(slug_dir: Path, name: str) -> None:
@@ -134,6 +158,49 @@ def _prompt_existing(link_path: Path) -> Literal["keep", "skip", "abort"]:
     )
     if raw == "k":
         return "keep"
+
+    if raw == "a":
+        return "abort"
+
+    return "skip"
+
+
+def _prompt_conflict(link_path: Path) -> Literal["use_stored", "use_local", "skip", "abort"]:
+    """Prompt for a cross-machine conflict: the entry exists both locally and in storage.
+
+    Reached when the repo has an untracked entry AND the slug already holds a
+    copy synced from another machine. In non-interactive mode (env
+    `LAC_NONINTERACTIVE=1` or no tty), auto-skip so neither side is destroyed.
+
+    Args:
+        link_path: Path of the existing untracked entry in the repo.
+
+    Returns:
+        One of "use_stored", "use_local", "skip", "abort".
+    """
+    if os.environ.get("LAC_NONINTERACTIVE") == "1" or not sys.stdin.isatty():
+        console.skip(link_path.name, "skipped (non-interactive mode)")
+        return "skip"
+
+    console.warn(
+        f"Conflict: {link_path.name} exists locally and in lac storage "
+        "(synced from another machine)."
+    )
+    c = console.console()
+    c.print("  [u]se stored  (back up local, link to the synced copy)", markup=False)
+    c.print("  [l]ocal       (overwrite stored; affects other machines on push)", markup=False)
+    c.print("  [s]kip this file", markup=False)
+    c.print("  [a]bort", markup=False)
+    raw = click.prompt(
+        "Choice [u/l/s/a]",
+        type=click.Choice(["u", "l", "s", "a"]),
+        show_choices=False,
+    )
+    if raw == "u":
+        return "use_stored"
+
+    if raw == "l":
+        return "use_local"
 
     if raw == "a":
         return "abort"
@@ -206,6 +273,16 @@ def _decide(cwd: Path, slug_dir: Path, name: str) -> _Decision:
         if is_tracked(cwd, name):
             return _Decision(name, "skip_tracked")
 
+        if target.exists():
+            choice = _prompt_conflict(link_path)
+            if choice == "skip":
+                return _Decision(name, "skip")
+            if choice == "abort":
+                return _Decision(name, "abort")
+            if choice == "use_stored":
+                return _Decision(name, "use_stored")
+            return _Decision(name, "keep_link")  # use_local
+
         choice = _prompt_existing(link_path)
         if choice == "skip":
             return _Decision(name, "skip")
@@ -251,6 +328,11 @@ def _apply_one(cwd: Path, slug_dir: Path, decision: _Decision) -> bool:
 
     if decision.action == "abort":
         raise RuntimeError("abort action should be handled by caller")  # pragma: no cover
+
+    if decision.action == "use_stored":
+        bak = _use_stored(link_path, target)
+        console.ok(f"{name} linked (local backed up: {bak.name})")
+        return True
 
     if decision.action == "keep_link":
         _copy_into_slug(link_path, target)
@@ -399,7 +481,7 @@ def _validate_link_arg(file: str) -> str | None:
     return None
 
 
-_LinkAction = Literal["link", "keep_link", "skip", "skip_tracked"]
+_LinkAction = Literal["link", "keep_link", "use_stored", "skip", "skip_tracked"]
 
 _LAC_QUESTIONARY_STYLE = questionary.Style(
     [
@@ -490,14 +572,19 @@ def _link_bulk(
             continue
 
         if cls == "untracked":
-            choice = _prompt_existing(cwd / name)
+            if (slug_dir / name).exists():
+                choice = _prompt_conflict(cwd / name)
+            else:
+                choice = _prompt_existing(cwd / name)
             if choice == "abort":
                 console.info("aborted (no changes)")
                 return
 
             if choice == "skip":
                 link_actions.append((name, "skip"))
-            else:
+            elif choice == "use_stored":
+                link_actions.append((name, "use_stored"))
+            else:  # keep / use_local
                 link_actions.append((name, "keep_link"))
             continue
 
@@ -530,7 +617,11 @@ def _link_bulk(
 
         target = slug_dir / name
         link_path = cwd / name
-        if action == "keep_link":
+        note = ""
+        if action == "use_stored":
+            bak = _use_stored(link_path, target)
+            note = f" (local backed up: {bak.name})"
+        elif action == "keep_link":
             _copy_into_slug(link_path, target)
             if link_path.is_dir() and not link_path.is_symlink():
                 shutil.rmtree(link_path)
@@ -551,7 +642,7 @@ def _link_bulk(
         if name in meta.unlinked_files:
             meta.unlinked_files.remove(name)
         linked_names.append(name)
-        console.ok(f"{name} linked")
+        console.ok(f"{name} linked{note}")
 
     if linked_names:
         try:

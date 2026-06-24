@@ -5,6 +5,13 @@ This project uses [CalVer](https://calver.org/) (YYYY.MM.PATCH).
 
 ## [Unreleased]
 
+### Fixed
+- `lac link` no longer silently overwrites a synced copy in storage with an
+  untracked local file. When both exist (a cross-machine collision), it now
+  prompts: use the stored copy (the local file is backed up to
+  `<name>.bak.<timestamp>`, never discarded) or overwrite storage with the
+  local file. Non-interactive runs skip the conflicting entry, as before.
+
 ## [2026.6.24] - 2026-06-24
 
 ### Added
