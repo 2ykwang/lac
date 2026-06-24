@@ -5,6 +5,8 @@ This project uses [CalVer](https://calver.org/) (YYYY.MM.PATCH).
 
 ## [Unreleased]
 
+## [2026.6.24] - 2026-06-24
+
 ### Added
 - `lac sync` fast-forwards lac home from its remote (pull-only; never merges,
   commits, or pushes). On divergence it changes nothing and points you to a
